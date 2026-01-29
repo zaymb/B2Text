@@ -175,4 +175,15 @@ outputs
 outputs/
 
 # Executable files
-*.exe
+*.exetest_*.py
+*.md
+check_*.sh
+run_*.sh
+.DS_Store
+recordings/
+__pycache__/
+*.pyc
+outputs/
+downloads/
+audio/
+bilibili_video/

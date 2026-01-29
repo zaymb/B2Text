@@ -11,7 +11,7 @@ def load_whisper(model="tiny"):
     whisper_model = whisper.load_model(model, device="cuda" if is_cuda_available() else "cpu")
     print("Whisper模型："+model)
 
-def run_analysis(filename, model="tiny", prompt="以下是普通话的句子。"):
+def run_analysis(filename, model="tiny", prompt=""):
     global whisper_model
     print("正在加载Whisper模型...")
     # 读取列表中的音频文件

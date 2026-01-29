@@ -1,46 +1,43 @@
 import os
 import re
+import shlex
+import glob
 import subprocess
-import glob  # 新增导入
 
-def ensure_folders_exist(output_dir):
-    if not os.path.exists("bilibili_video"):
-        os.makedirs("bilibili_video")
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    if not os.path.exists("outputs"):
-        os.makedirs("outputs")
+YTDLP = "/usr/local/bin/yt-dlp"  # yt-dlp 绝对路径
 
-def download_video(bv_number):
-    """
-    使用you-get下载B站视频。
-    参数:
-        bv_number: 字符串形式的BV号（不含"BV"前缀）或完整BV号
-    返回:
-        文件路径
-    """
-    if not bv_number.startswith("BV"):
-        bv_number = "BV" + bv_number
-    video_url = f"https://www.bilibili.com/video/{bv_number}"
-    output_dir = f"bilibili_video/{bv_number}" # 下载视频到 bilibili_video/{bv_number} 目录
-    ensure_folders_exist(output_dir)
-    print(f"使用you-get下载视频: {video_url}")
-    try:
-        result = subprocess.run(["you-get", "-l", "-o", output_dir, video_url], capture_output=True, text=True)
-        if result.returncode != 0:
-            print("下载失败:", result.stderr)
-        else:
-            print(result.stdout)
-            print(f"视频已成功下载到目录: {output_dir}")
-            video_files = glob.glob(os.path.join(output_dir, "*.mp4"))
-            if video_files:
-                # 删除xml文件
-                xml_files = glob.glob(os.path.join(output_dir, "*.xml"))
-                for xml_file in xml_files:
-                    os.remove(xml_file)
-            else:
-                file_path = ""
-    except Exception as e:
-        print("发生错误:", str(e))
-        file_path = ""
-    return bv_number
+def _extract_bv(s: str) -> str:
+    s = (s or "").strip()
+    m = re.search(r"(BV[0-9A-Za-z]{10,})", s)
+    if not m:
+        raise ValueError("请输入合法的 BV 号或 URL")
+    return m.group(1)
+
+def download_bilibili(url_or_bv: str, out_root: str = "bilibili_video", need_cookies: bool = False, browser: str = "safari") -> str:
+    """使用 yt-dlp 下载 B 站视频并返回下载目录路径。"""
+    bv = _extract_bv(url_or_bv)
+    url = f"https://www.bilibili.com/video/{bv}"
+
+    os.makedirs(out_root, exist_ok=True)
+    tmpl = os.path.join(out_root, "%(id)s/%(id)s.%(ext)s")
+
+    cmd = f'{shlex.quote(YTDLP)} -S "res:1080" -o {shlex.quote(tmpl)} {shlex.quote(url)}'
+    if need_cookies:
+        cmd += f" --cookies-from-browser {shlex.quote(browser)}"
+
+    proc = subprocess.run(cmd, shell=True)
+    if proc.returncode != 0:
+        raise RuntimeError("下载失败：yt-dlp 返回非零状态码")
+
+    folder = os.path.join(out_root, bv)
+    media_files = glob.glob(os.path.join(folder, "*.*"))
+    if not (os.path.isdir(folder) and media_files):
+        raise FileNotFoundError(f"下载目录无媒体文件：{folder}")
+
+    for xml in glob.glob(os.path.join(folder, "*.xml")):
+        try:
+            os.remove(xml)
+        except Exception:
+            pass
+
+    return folder
