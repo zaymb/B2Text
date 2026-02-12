@@ -156,6 +156,13 @@ class Bili2TextGUI:
                                        variable=self.enable_filter_var)
         filter_check.grid(row=4, column=0, columnspan=2, pady=5)
 
+        # 静音检测选项
+        self.rt_silence_detect_var = tk.BooleanVar(value=True)
+        rt_silence_check = ttk.Checkbutton(settings_frame,
+                                           text="启用静音超时检测（30秒无声自动停止）",
+                                           variable=self.rt_silence_detect_var)
+        rt_silence_check.grid(row=5, column=0, columnspan=2, pady=5)
+
         # 控制按钮
         control_frame = ttk.Frame(self.realtime_frame)
         control_frame.pack(pady=10)
@@ -239,6 +246,30 @@ class Bili2TextGUI:
                                  command=self.refresh_audio_devices,
                                  width=6)
         refresh_btn.pack(side='left', padx=2)
+
+        # 静音检测设置框架
+        silence_frame = ttk.LabelFrame(self.local_file_frame, text="静音自动检测")
+        silence_frame.pack(pady=5, padx=20, fill='x')
+
+        self.silence_detect_var = tk.BooleanVar(value=True)
+        silence_check = ttk.Checkbutton(silence_frame, text="启用静音自动检测",
+                                        variable=self.silence_detect_var)
+        silence_check.pack(anchor='w', padx=5, pady=2)
+
+        silence_params_frame = ttk.Frame(silence_frame)
+        silence_params_frame.pack(anchor='w', padx=20, pady=2)
+
+        ttk.Label(silence_params_frame, text="警告阈值(秒):").pack(side='left', padx=2)
+        self.silence_warn_var = tk.IntVar(value=10)
+        warn_spin = ttk.Spinbox(silence_params_frame, from_=5, to=60,
+                                textvariable=self.silence_warn_var, width=5)
+        warn_spin.pack(side='left', padx=2)
+
+        ttk.Label(silence_params_frame, text="自动停止(秒):").pack(side='left', padx=(10, 2))
+        self.silence_stop_var = tk.IntVar(value=30)
+        stop_spin = ttk.Spinbox(silence_params_frame, from_=10, to=120,
+                                textvariable=self.silence_stop_var, width=5)
+        stop_spin.pack(side='left', padx=2)
 
         # 文件路径显示框架
         file_path_frame = ttk.Frame(self.local_file_frame)
@@ -445,11 +476,23 @@ GitHub: https://github.com/lanbinleo/bili2text
             self.status_label.config(text="状态: 正在加载模型...")
             self.root.update()
 
+            # 静音检测配置
+            silence_kwargs = {}
+            if self.rt_silence_detect_var.get():
+                silence_kwargs = dict(
+                    silence_warning_threshold=10,
+                    silence_stop_threshold=30,
+                    on_silence_warning=self._on_rt_silence_warning,
+                    on_silence_stop=self._on_rt_silence_stop,
+                    on_speech_resumed=self._on_rt_speech_resumed,
+                )
+
             self.recognizer = RealtimeRecognizer(
                 model_name=model,
                 device_name=device,
                 initial_prompt=prompt,
-                enable_hallucination_filter=enable_filter
+                enable_hallucination_filter=enable_filter,
+                **silence_kwargs
             )
 
             # 开始录音
@@ -526,10 +569,23 @@ GitHub: https://github.com/lanbinleo/bili2text
         """开始录音（使用分段录音器，突破6分30秒限制）"""
         try:
             device = self.record_device_var.get()
+
+            # 静音检测配置
+            silence_kwargs = {}
+            if self.silence_detect_var.get():
+                silence_kwargs = dict(
+                    silence_warning_threshold=self.silence_warn_var.get(),
+                    silence_stop_threshold=self.silence_stop_var.get(),
+                    on_silence_warning=self._on_silence_warning,
+                    on_silence_stop=self._on_silence_stop,
+                    on_speech_resumed=self._on_speech_resumed,
+                )
+
             # 使用分段录音器，每5分钟一段，支持长时间录音
             self.audio_recorder = ChunkedAudioRecorder(
                 device_name=device,
-                chunk_duration=300  # 5分钟一段
+                chunk_duration=300,  # 5分钟一段
+                **silence_kwargs
             )
 
             # 启动录音
@@ -756,6 +812,74 @@ GitHub: https://github.com/lanbinleo/bili2text
         self.local_result = None
         self.local_save_btn.config(state='disabled')
         self.local_status_label.config(text="状态: 就绪")
+
+    # ---- 系统通知 ----
+    def _send_notification(self, title, message):
+        """发送 macOS 系统通知"""
+        try:
+            import subprocess
+            subprocess.Popen([
+                'osascript', '-e',
+                f'display notification "{message}" with title "{title}"'
+            ])
+        except Exception:
+            pass
+
+    # ---- Tab 3 静音检测回调 ----
+    def _on_silence_warning(self, duration):
+        """Tab 3: 静音警告"""
+        self.root.after(0, lambda: self.record_status_label.config(
+            text=f"录音状态: 静音警告! 已静音 {int(duration)} 秒",
+            foreground='orange'))
+        self._send_notification("录音静音警告",
+                                f"已静音 {int(duration)} 秒，{self.silence_stop_var.get()} 秒后将自动停止")
+
+    def _on_silence_stop(self, duration):
+        """Tab 3: 静音自动停止"""
+        self.root.after(0, lambda: self._do_silence_stop_recording(duration))
+        self._send_notification("录音已自动停止",
+                                f"持续静音 {int(duration)} 秒，录音已自动停止")
+
+    def _do_silence_stop_recording(self, duration):
+        """在主线程中执行停止录音"""
+        self.record_status_label.config(
+            text=f"录音状态: 已自动停止（静音 {int(duration)} 秒）",
+            foreground='red')
+        self.stop_recording()
+
+    def _on_speech_resumed(self):
+        """Tab 3: 声音恢复"""
+        self.root.after(0, lambda: self.record_status_label.config(
+            text="录音状态: 录制中（声音已恢复）",
+            foreground='green'))
+
+    # ---- Tab 2 静音检测回调 ----
+    def _on_rt_silence_warning(self, duration):
+        """Tab 2: 静音警告"""
+        self.root.after(0, lambda: self.status_label.config(
+            text=f"状态: 静音警告! 已静音 {int(duration)} 秒",
+            foreground='orange'))
+        self._send_notification("实时识别静音警告",
+                                f"已静音 {int(duration)} 秒，30 秒后将自动停止")
+
+    def _on_rt_silence_stop(self, duration):
+        """Tab 2: 静音自动停止"""
+        self.root.after(0, lambda: self._do_rt_silence_stop(duration))
+        self._send_notification("实时识别已自动停止",
+                                f"持续静音 {int(duration)} 秒，识别已自动停止")
+
+    def _do_rt_silence_stop(self, duration):
+        """在主线程中执行停止实时识别"""
+        self.status_label.config(
+            text=f"状态: 已自动停止（静音 {int(duration)} 秒）",
+            foreground='red')
+        self.stop_realtime_recognition()
+
+    def _on_rt_speech_resumed(self):
+        """Tab 2: 声音恢复"""
+        self.root.after(0, lambda: self.status_label.config(
+            text="状态: 正在识别...",
+            foreground='black'))
 
 
 def main():

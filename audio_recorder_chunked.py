@@ -12,12 +12,19 @@ from datetime import datetime
 
 
 class ChunkedAudioRecorder:
-    def __init__(self, device_name="Background Music", output_dir="recordings", chunk_duration=300):
+    def __init__(self, device_name="Background Music", output_dir="recordings", chunk_duration=300,
+                 silence_warning_threshold=None, silence_stop_threshold=None,
+                 on_silence_warning=None, on_silence_stop=None, on_speech_resumed=None):
         """
         初始化分段录音器
         :param device_name: 音频设备名称
         :param output_dir: 输出目录
         :param chunk_duration: 每段时长（秒），默认5分钟
+        :param silence_warning_threshold: 静音警告阈值（秒），None 表示不启用
+        :param silence_stop_threshold: 静音自动停止阈值（秒），None 表示不启用
+        :param on_silence_warning: 静音警告回调
+        :param on_silence_stop: 静音自动停止回调
+        :param on_speech_resumed: 声音恢复回调
         """
         self.device_name = device_name
         self.output_dir = output_dir
@@ -30,6 +37,14 @@ class ChunkedAudioRecorder:
         self.duration_callback = None
         self.current_chunk = 0
         self.session_id = None  # 添加session ID用于区分不同录音会话
+
+        # 静音检测配置
+        self.silence_warning_threshold = silence_warning_threshold
+        self.silence_stop_threshold = silence_stop_threshold
+        self.on_silence_warning = on_silence_warning
+        self.on_silence_stop = on_silence_stop
+        self.on_speech_resumed = on_speech_resumed
+        self.silence_monitor = None
 
         # 创建录音目录
         os.makedirs(output_dir, exist_ok=True)
@@ -57,6 +72,23 @@ class ChunkedAudioRecorder:
             duration_thread = threading.Thread(target=self._update_duration)
             duration_thread.daemon = True
             duration_thread.start()
+
+        # 启动静音监视器（如果配置了阈值）
+        if self.silence_warning_threshold and self.silence_stop_threshold:
+            try:
+                from silence_monitor import SilenceMonitor
+                self.silence_monitor = SilenceMonitor(
+                    device_name=self.device_name,
+                    warning_threshold=self.silence_warning_threshold,
+                    stop_threshold=self.silence_stop_threshold,
+                    on_warning=self.on_silence_warning,
+                    on_stop=self.on_silence_stop,
+                    on_speech_resumed=self.on_speech_resumed
+                )
+                self.silence_monitor.start()
+            except Exception as e:
+                print(f"静音监视器启动失败（不影响录音）: {e}")
+                self.silence_monitor = None
 
         print("开始分段录音（每5分钟一个文件）...")
         return True
@@ -115,6 +147,14 @@ class ChunkedAudioRecorder:
             return None
 
         self.recording = False
+
+        # 先停止静音监视器
+        if self.silence_monitor:
+            try:
+                self.silence_monitor.stop()
+            except Exception:
+                pass
+            self.silence_monitor = None
 
         # 停止当前录制进程
         if self.current_process:

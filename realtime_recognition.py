@@ -9,13 +9,21 @@ from datetime import datetime
 import os
 
 class RealtimeRecognizer:
-    def __init__(self, model_name="base", device_name=None, initial_prompt="", enable_hallucination_filter=True):
+    def __init__(self, model_name="base", device_name=None, initial_prompt="",
+                 enable_hallucination_filter=True,
+                 silence_warning_threshold=None, silence_stop_threshold=None,
+                 on_silence_warning=None, on_silence_stop=None, on_speech_resumed=None):
         """
         初始化实时识别器
         :param model_name: whisper模型名称 (tiny, base, small, medium, large)
         :param device_name: 音频设备名称，如果为None则自动检测BlackHole
         :param initial_prompt: 初始提示词，用于提高识别准确度
         :param enable_hallucination_filter: 是否启用幻觉过滤
+        :param silence_warning_threshold: 静音警告阈值（秒），None 表示不启用
+        :param silence_stop_threshold: 静音自动停止阈值（秒），None 表示不启用
+        :param on_silence_warning: 静音警告回调 fn(duration)
+        :param on_silence_stop: 静音自动停止回调 fn(duration)
+        :param on_speech_resumed: 声音恢复回调 fn()
         """
         self.model = whisper.load_model(model_name)
         self.p = pyaudio.PyAudio()
@@ -45,6 +53,15 @@ class RealtimeRecognizer:
             import re
             words = re.findall(r'[\u4e00-\u9fa5]+', initial_prompt)
             self.hallucination_keywords = [w for w in words if len(w) > 2]
+
+        # 静音检测配置
+        self.silence_warning_threshold = silence_warning_threshold
+        self.silence_stop_threshold = silence_stop_threshold
+        self.on_silence_warning = on_silence_warning
+        self.on_silence_stop = on_silence_stop
+        self.on_speech_resumed = on_speech_resumed
+        self._silence_start_time = None
+        self._silence_warning_sent = False
 
         # 查找BlackHole设备
         self.find_blackhole_device()
@@ -243,7 +260,29 @@ class RealtimeRecognizer:
                 # 检测是否为静音（仅在启用过滤时）
                 if self.enable_hallucination_filter and self.is_silence(audio_array):
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] 检测到静音，跳过...")
+
+                    # 静音时长追踪（如果启用了静音检测）
+                    if self.silence_warning_threshold and self.silence_stop_threshold:
+                        if self._silence_start_time is None:
+                            self._silence_start_time = time.time()
+                        silence_duration = time.time() - self._silence_start_time
+
+                        if silence_duration >= self.silence_stop_threshold:
+                            if self.on_silence_stop:
+                                self.on_silence_stop(silence_duration)
+                            return  # 退出识别循环
+                        elif silence_duration >= self.silence_warning_threshold and not self._silence_warning_sent:
+                            if self.on_silence_warning:
+                                self.on_silence_warning(silence_duration)
+                            self._silence_warning_sent = True
+
                     continue
+                else:
+                    # 非静音：如果之前发过警告，触发恢复回调并重置
+                    if self._silence_warning_sent and self.on_speech_resumed:
+                        self.on_speech_resumed()
+                    self._silence_start_time = None
+                    self._silence_warning_sent = False
 
                 # 使用Whisper识别
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] 正在识别音频片段...")
