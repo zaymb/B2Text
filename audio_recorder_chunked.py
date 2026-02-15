@@ -14,7 +14,8 @@ from datetime import datetime
 class ChunkedAudioRecorder:
     def __init__(self, device_name="Background Music", output_dir="recordings", chunk_duration=300,
                  silence_warning_threshold=None, silence_stop_threshold=None,
-                 on_silence_warning=None, on_silence_stop=None, on_speech_resumed=None):
+                 on_silence_warning=None, on_silence_stop=None, on_speech_resumed=None,
+                 level_callback=None):
         """
         初始化分段录音器
         :param device_name: 音频设备名称
@@ -45,6 +46,7 @@ class ChunkedAudioRecorder:
         self.on_silence_stop = on_silence_stop
         self.on_speech_resumed = on_speech_resumed
         self.silence_monitor = None
+        self.level_callback = level_callback
 
         # 创建录音目录
         os.makedirs(output_dir, exist_ok=True)
@@ -73,17 +75,19 @@ class ChunkedAudioRecorder:
             duration_thread.daemon = True
             duration_thread.start()
 
-        # 启动静音监视器（如果配置了阈值）
-        if self.silence_warning_threshold and self.silence_stop_threshold:
+        # 启动静音监视器（静音检测或音量回调）
+        need_monitor = (self.silence_warning_threshold and self.silence_stop_threshold) or self.level_callback
+        if need_monitor:
             try:
                 from silence_monitor import SilenceMonitor
                 self.silence_monitor = SilenceMonitor(
                     device_name=self.device_name,
-                    warning_threshold=self.silence_warning_threshold,
-                    stop_threshold=self.silence_stop_threshold,
+                    warning_threshold=self.silence_warning_threshold or 999,
+                    stop_threshold=self.silence_stop_threshold or 999,
                     on_warning=self.on_silence_warning,
                     on_stop=self.on_silence_stop,
-                    on_speech_resumed=self.on_speech_resumed
+                    on_speech_resumed=self.on_speech_resumed,
+                    level_callback=self.level_callback
                 )
                 self.silence_monitor.start()
             except Exception as e:

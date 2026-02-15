@@ -39,12 +39,15 @@ class ChunkedFileRecognizer:
         if self.progress_callback:
             self.progress_callback(message)
 
-    def process_chunks(self, chunk_files, save_to_file=True, delete_after=False):
+    def process_chunks(self, chunk_files, save_to_file=True, delete_after=False,
+                       chunk_callback=None, frame_callback=None):
         """
         处理多个分段文件
         :param chunk_files: 文件路径列表或单个文件路径
         :param save_to_file: 是否保存到文件
         :param delete_after: 识别完成后是否删除分段文件
+        :param chunk_callback: 每段识别后的回调 fn(idx, total, text) -> bool，返回 False 中止
+        :param frame_callback: 帧级进度回调 fn(chunk_idx, total_chunks, current_frames, total_frames)
         :return: 合并后的识别文本
         """
         # 确保是列表
@@ -82,15 +85,29 @@ class ChunkedFileRecognizer:
                 else:
                     prompt = self.initial_prompt
 
-                # 识别当前分段
-                result = self.model.transcribe(
-                    chunk_path,
-                    language="zh",
-                    initial_prompt=prompt,
-                    temperature=0.0,  # 降低随机性
-                    fp16=False,
-                    verbose=False  # 不显示详细进度
-                )
+                # 识别当前分段（捕获 tqdm 帧级进度）
+                if frame_callback:
+                    import whisper.transcribe as _wt
+                    from tqdm import tqdm as _orig_tqdm
+                    _chunk_i, _total_c = i, total_chunks
+
+                    class _ProgressTqdm(_orig_tqdm):
+                        def update(self, n=1):
+                            super().update(n)
+                            frame_callback(_chunk_i, _total_c, self.n, self.total)
+
+                    _saved = _wt.tqdm
+                    _wt.tqdm = _ProgressTqdm
+                    try:
+                        result = self.model.transcribe(
+                            chunk_path, language="zh", initial_prompt=prompt,
+                            temperature=0.2, fp16=False, verbose=False)
+                    finally:
+                        _wt.tqdm = _saved
+                else:
+                    result = self.model.transcribe(
+                        chunk_path, language="zh", initial_prompt=prompt,
+                        temperature=0.2, fp16=False, verbose=False)
 
                 # 提取文本
                 text = result["text"].strip()
@@ -101,6 +118,11 @@ class ChunkedFileRecognizer:
                     # 计算进度百分比
                     progress = int((i / total_chunks) * 100)
                     self._update_progress(f"[{i}/{total_chunks}] 完成 {progress}% - {len(text)}字符")
+
+                    # 回调检查（重复检测等）
+                    if chunk_callback and not chunk_callback(i, total_chunks, text):
+                        self._update_progress("识别已中止")
+                        break
 
             except Exception as e:
                 self._update_progress(f"识别失败 {file_name}: {str(e)}")

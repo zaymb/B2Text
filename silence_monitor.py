@@ -12,8 +12,8 @@ import time
 
 class SilenceMonitor:
     def __init__(self, device_name, warning_threshold=10, stop_threshold=30,
-                 energy_threshold=0.001, on_warning=None, on_stop=None,
-                 on_speech_resumed=None):
+                 energy_threshold=0.0003, on_warning=None, on_stop=None,
+                 on_speech_resumed=None, level_callback=None):
         """
         初始化静音监视器
         :param device_name: 音频设备名称
@@ -31,6 +31,7 @@ class SilenceMonitor:
         self.on_warning = on_warning
         self.on_stop = on_stop
         self.on_speech_resumed = on_speech_resumed
+        self.level_callback = level_callback
 
         # 音频参数（与 RealtimeRecognizer 一致）
         self.FORMAT = pyaudio.paFloat32
@@ -108,6 +109,10 @@ class SilenceMonitor:
                 # 双声道转单声道
                 if self.CHANNELS == 2:
                     audio_array = audio_array.reshape(-1, 2).mean(axis=1)
+
+                # 回调音频波形数据
+                if self.level_callback:
+                    self.level_callback(audio_array)
 
                 silent = self._is_silence(audio_array)
 

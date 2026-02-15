@@ -12,7 +12,8 @@ class RealtimeRecognizer:
     def __init__(self, model_name="base", device_name=None, initial_prompt="",
                  enable_hallucination_filter=True,
                  silence_warning_threshold=None, silence_stop_threshold=None,
-                 on_silence_warning=None, on_silence_stop=None, on_speech_resumed=None):
+                 on_silence_warning=None, on_silence_stop=None, on_speech_resumed=None,
+                 level_callback=None):
         """
         初始化实时识别器
         :param model_name: whisper模型名称 (tiny, base, small, medium, large)
@@ -62,6 +63,7 @@ class RealtimeRecognizer:
         self.on_speech_resumed = on_speech_resumed
         self._silence_start_time = None
         self._silence_warning_sent = False
+        self.level_callback = level_callback
 
         # 查找BlackHole设备
         self.find_blackhole_device()
@@ -220,6 +222,13 @@ class RealtimeRecognizer:
                         break
                     data = self.stream.read(self.CHUNK, exception_on_overflow=False)
                     current_frames.append(data)
+
+                    # 回调音频波形数据
+                    if self.level_callback:
+                        audio_array = np.frombuffer(data, dtype=np.float32)
+                        if self.CHANNELS == 2:
+                            audio_array = audio_array.reshape(-1, 2).mean(axis=1)
+                        self.level_callback(audio_array)
 
                 if current_frames:
                     # 将音频数据加入队列

@@ -118,7 +118,7 @@ class LocalFileRecognizer:
                 initial_prompt=self.initial_prompt,
                 temperature=0.0,  # 降低随机性
                 fp16=False,  # 兼容性更好
-                verbose=True  # 显示进度
+                verbose=False  # 使用 tqdm 进度条
             )
 
             # 提取文本
