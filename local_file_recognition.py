@@ -25,6 +25,7 @@ class LocalFileRecognizer:
         self.initial_prompt = initial_prompt or "以下是普通话的句子。"
         self.progress_callback = progress_callback
         self.is_processing = False
+        self.last_output_file = None
 
         # 支持的文件格式
         self.audio_formats = {'.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg', '.wma', '.opus'}
@@ -144,6 +145,7 @@ class LocalFileRecognizer:
                     f.write("=" * 50 + "\n\n")
                     f.write(full_text)
 
+                self.last_output_file = output_file
                 self._update_progress(f"识别完成！结果已保存到: {output_file}")
                 print(f"结果保存到: {output_file}")
             else:

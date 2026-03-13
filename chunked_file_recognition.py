@@ -22,6 +22,7 @@ class ChunkedFileRecognizer:
         self.initial_prompt = initial_prompt or "以下是普通话的句子。"
         self.progress_callback = progress_callback
         self.model = None
+        self.last_output_file = None
 
         # 加载模型
         self._load_model()
@@ -87,7 +88,7 @@ class ChunkedFileRecognizer:
 
                 # 识别当前分段（捕获 tqdm 帧级进度）
                 if frame_callback:
-                    import whisper.transcribe as _wt
+                    import tqdm as _tqdm_mod
                     from tqdm import tqdm as _orig_tqdm
                     _chunk_i, _total_c = i, total_chunks
 
@@ -96,14 +97,14 @@ class ChunkedFileRecognizer:
                             super().update(n)
                             frame_callback(_chunk_i, _total_c, self.n, self.total)
 
-                    _saved = _wt.tqdm
-                    _wt.tqdm = _ProgressTqdm
+                    _saved_cls = _tqdm_mod.tqdm
+                    _tqdm_mod.tqdm = _ProgressTqdm
                     try:
                         result = self.model.transcribe(
                             chunk_path, language="zh", initial_prompt=prompt,
                             temperature=0.2, fp16=False, verbose=False)
                     finally:
-                        _wt.tqdm = _saved
+                        _tqdm_mod.tqdm = _saved_cls
                 else:
                     result = self.model.transcribe(
                         chunk_path, language="zh", initial_prompt=prompt,
@@ -135,13 +136,17 @@ class ChunkedFileRecognizer:
         # 保存到文件
         if save_to_file and final_text:
             output_file = self._save_result(final_text, chunk_files[0])
+            self.last_output_file = output_file
             self._update_progress(f"识别完成！结果已保存到: {output_file}")
         else:
             self._update_progress("识别完成！")
 
-        # 删除分段文件（如果需要）
+        # 删除分段文件（如果需要）— 仅在有识别结果时删除
         if delete_after and chunk_files:
-            self._cleanup_chunks(chunk_files)
+            if final_text.strip():
+                self._cleanup_chunks(chunk_files)
+            else:
+                self._update_progress("安全锁: 识别结果为空，跳过删除分段文件以防数据丢失")
 
         return final_text
 

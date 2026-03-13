@@ -14,6 +14,7 @@ from local_file_recognition import LocalFileRecognizer
 from audio_recorder import AudioRecorder
 from audio_recorder_chunked import ChunkedAudioRecorder
 from chunked_file_recognition import ChunkedFileRecognizer
+import subprocess
 import shutil
 import time
 from datetime import datetime
@@ -39,6 +40,10 @@ class Bili2TextGUI:
         self.chunk_files = None
         self._cleanable_paths = []  # Tab 1 待清理的中间文件路径
         self._rt_cleanable_paths = []  # Tab 2 待清理的输出文件路径
+        self._test_monitor = None  # 音频测试用 SilenceMonitor
+        self._last_output_path = None  # 最近一次识别的输出文件路径
+        self._recognition_running = False  # 识别线程是否在跑
+        self._pending_session = None  # 排队等待识别的 chunk_files
 
         self.setup_ui()
 
@@ -148,6 +153,10 @@ class Bili2TextGUI:
                                           state='disabled')
         self.stop_record_btn.pack(side='left', padx=5)
 
+        self.test_audio_btn = ttk.Button(record_control, text="测试音频",
+                                         command=self._toggle_audio_test)
+        self.test_audio_btn.pack(side='left', padx=5)
+
         # 设备选择
         device_frame = ttk.Frame(self.record_input_frame)
         device_frame.pack(pady=3)
@@ -221,8 +230,8 @@ class Bili2TextGUI:
         save_frame = ttk.Frame(self.file_tab_frame)
         save_frame.pack(pady=5)
 
-        self.file_save_btn = ttk.Button(save_frame, text="保存结果",
-                                        command=self.save_file_result,
+        self.file_save_btn = ttk.Button(save_frame, text="查看结果",
+                                        command=self._open_result_file,
                                         state='disabled')
         self.file_save_btn.pack(side='left', padx=5)
 
@@ -237,6 +246,15 @@ class Bili2TextGUI:
     def _switch_input_mode(self):
         """切换输入源，显示/隐藏对应的动态帧"""
         mode = self.input_mode_var.get()
+
+        # 切换模式时停止音频测试
+        if self._test_monitor is not None:
+            self._test_monitor.stop()
+            self._test_monitor = None
+            self._stop_waveform()
+            self.test_audio_btn.config(text="测试音频")
+            self._update_record_btn_state()
+            self.device_combo.config(state='readonly')
 
         # 隐藏所有动态帧
         for frame in (self.bv_input_frame, self.record_input_frame, self.file_input_frame):
@@ -263,6 +281,10 @@ class Bili2TextGUI:
 
     def _start_file_action(self):
         """统一开始按钮：根据输入模式分发"""
+        if self._recognition_running:
+            messagebox.showinfo("提示", "上一轮识别还在跑，请稍候")
+            return
+
         mode = self.input_mode_var.get()
 
         if mode == "bv":
@@ -325,6 +347,7 @@ class Bili2TextGUI:
                 run_analysis(foldername)
 
             output_path = f"outputs/{foldername}.txt"
+            self._last_output_path = output_path
             self._log_result(f"转换完成！文件保存在: {output_path}")
 
             # 读取结果到文本框
@@ -369,6 +392,10 @@ class Bili2TextGUI:
 
     def _local_recognition_thread(self):
         """本地文件/录音识别线程"""
+        self._recognition_running = True
+        # snapshot chunk_files 到局部变量，不依赖 self.chunk_files（可能被新录音覆盖）
+        snapshot_chunks = list(self.chunk_files) if self.chunk_files else None
+
         try:
             self.file_start_btn.config(state='disabled')
             self.browse_btn.config(state='disabled')
@@ -380,9 +407,9 @@ class Bili2TextGUI:
 
             self.file_result_text.delete(1.0, tk.END)
 
-            if hasattr(self, 'chunk_files') and self.chunk_files and len(self.chunk_files) > 1:
+            if snapshot_chunks and len(snapshot_chunks) > 1:
                 # 分段识别
-                num_chunks = len(self.chunk_files)
+                num_chunks = len(snapshot_chunks)
                 self.record_status_label.config(
                     text=f"识别状态: 准备识别{num_chunks}个分段...")
                 self._update_file_status("正在进行分段识别...")
@@ -392,7 +419,7 @@ class Bili2TextGUI:
                 self.file_progress.config(mode='determinate', maximum=1000, value=0)
 
                 managed = self.managed_mode_var.get()
-                self._cleanable_paths = list(self.chunk_files)
+                self._cleanable_paths = list(snapshot_chunks)
 
                 # 帧级进度回调
                 def on_frame_progress(chunk_idx, total_chunks, current_frames, total_frames):
@@ -428,28 +455,35 @@ class Bili2TextGUI:
                 )
 
                 self.local_result = chunked_recognizer.process_chunks(
-                    self.chunk_files,
+                    snapshot_chunks,
                     save_to_file=True,
                     delete_after=managed,
                     chunk_callback=on_chunk_done,
                     frame_callback=on_frame_progress
                 )
 
+                self._last_output_path = chunked_recognizer.last_output_file
+
                 if managed:
-                    self.record_status_label.config(
-                        text=f"识别状态: 完成（已识别{num_chunks}段，文件已清理）")
-                    self._cleanable_paths = []
+                    if self.local_result and self.local_result.strip():
+                        self.record_status_label.config(
+                            text=f"识别状态: 完成（已识别{num_chunks}段，文件已清理）")
+                        self._cleanable_paths = []
+                    else:
+                        # 识别失败，文件未删除
+                        self.record_status_label.config(
+                            text=f"识别状态: 失败（文件已保留，可手动清理）")
+                        self.file_clean_btn.config(state='normal')
                 else:
                     self.record_status_label.config(
                         text=f"识别状态: 完成（已识别{num_chunks}段）")
                     self.file_clean_btn.config(state='normal')
-                self.chunk_files = None
 
-            elif hasattr(self, 'chunk_files') and self.chunk_files and len(self.chunk_files) == 1:
+            elif snapshot_chunks and len(snapshot_chunks) == 1:
                 # 单个录音分段
                 self.record_status_label.config(text="识别状态: 正在识别...")
                 self._update_file_status("正在识别...")
-                self._cleanable_paths = list(self.chunk_files)
+                self._cleanable_paths = list(snapshot_chunks)
 
                 # 确定进度条
                 self.file_progress.stop()
@@ -463,7 +497,9 @@ class Bili2TextGUI:
 
                 self.local_result = self._transcribe_with_progress(
                     lambda: self.local_recognizer.process_file(
-                        self.chunk_files[0], save_to_file=True))
+                        snapshot_chunks[0], save_to_file=True))
+
+                self._last_output_path = self.local_recognizer.last_output_file
 
                 # 重复检测
                 if self.local_result and self._is_repetitive(self.local_result):
@@ -473,7 +509,10 @@ class Bili2TextGUI:
                         "可能是录音出了问题。建议重新录制。"))
 
                 if self.managed_mode_var.get():
-                    self._do_clean_files()
+                    if self.local_result and self.local_result.strip():
+                        self._do_clean_files()
+                    else:
+                        self.file_clean_btn.config(state='normal')
                 else:
                     self.file_clean_btn.config(state='normal')
 
@@ -496,6 +535,8 @@ class Bili2TextGUI:
                     lambda: self.local_recognizer.process_file(
                         file_path, save_to_file=True))
 
+                self._last_output_path = self.local_recognizer.last_output_file
+
             # 显示结果
             self.file_result_text.insert(tk.END, self.local_result)
             self.file_result_text.see(1.0)
@@ -517,10 +558,20 @@ class Bili2TextGUI:
             messagebox.showerror("错误", str(e))
 
         finally:
+            self._recognition_running = False
             self.file_start_btn.config(state='normal')
             self.browse_btn.config(state='normal')
             self.file_progress.stop()
             self.file_progress.config(mode='indeterminate', value=0)
+
+            # 检查排队的 session
+            if self._pending_session:
+                self.chunk_files = self._pending_session
+                self._pending_session = None
+                self.root.after(0, self._start_file_action)
+
+            # 刷新录制按钮状态
+            self.root.after(0, self._update_record_btn_state)
 
     # ---- 录音相关 ----
 
@@ -550,7 +601,8 @@ class Bili2TextGUI:
                 self._start_waveform()
                 self.record_status_label.config(text="录音状态: 录制中 00:00 (第1段)",
                                                 foreground='black')
-                self.start_record_btn.config(text="开始录制", state='disabled')
+                self.start_record_btn.config(text="开始录制")
+                self._update_record_btn_state()
                 self.stop_record_btn.config(state='normal')
                 self.file_start_btn.config(state='disabled')
             else:
@@ -569,29 +621,46 @@ class Bili2TextGUI:
         self.root.update()
 
         chunk_files = self.audio_recorder.stop_recording(merge=False)
+        self.audio_recorder = None
+        self.stop_record_btn.config(state='disabled')
 
         if chunk_files:
             new_chunks = chunk_files if isinstance(chunk_files, list) else [chunk_files]
-            if self.chunk_files is None:
-                self.chunk_files = []
-            self.chunk_files.extend(new_chunks)
 
-            total = len(self.chunk_files)
-            self.record_status_label.config(
-                text=f"录音状态: 已完成（{total}段，待识别）")
-            self.file_start_btn.config(state='normal')
-
-            # 托管模式：自动开始识别
-            if self.managed_mode_var.get():
+            # 托管模式：识别正在跑 → 排队
+            if self.managed_mode_var.get() and self._recognition_running:
+                self._pending_session = new_chunks
+                self.record_status_label.config(
+                    text="托管模式：上一轮识别中，新录音已排队")
+                # 给下一轮录音腾位置（chunk_files 已被 snapshot）
+                self.chunk_files = None
+            elif self.managed_mode_var.get():
+                # 托管模式：直接开始识别
+                self.chunk_files = new_chunks
+                self._cleanable_paths = list(new_chunks)
+                self.file_clean_btn.config(state='normal')
                 self.record_status_label.config(text="托管模式：自动开始识别...")
                 self._start_file_action()
+            else:
+                # 非托管模式
+                if self.chunk_files is None:
+                    self.chunk_files = []
+                self.chunk_files.extend(new_chunks)
+
+                total = len(self.chunk_files)
+                self.record_status_label.config(
+                    text=f"录音状态: 已完成（{total}段，待识别）")
+                self.file_start_btn.config(state='normal')
+
+                # 启用清理按钮（允许用户丢弃本次录音）
+                self._cleanable_paths = list(self.chunk_files)
+                self.file_clean_btn.config(state='normal')
         else:
             if not self.chunk_files:
                 self.record_status_label.config(text="录音状态: 未开始")
 
-        self.start_record_btn.config(text="开始录制", state='normal')
-        self.stop_record_btn.config(state='disabled')
-        self.audio_recorder = None
+        self.start_record_btn.config(text="开始录制")
+        self._update_record_btn_state()
 
     def _update_record_duration(self, duration):
         """更新录音时长显示"""
@@ -625,6 +694,8 @@ class Bili2TextGUI:
 
     def _on_audio_level(self, audio_array):
         """音频波形回调（从后端线程调用），接收单声道 numpy 数组"""
+        if not self._waveform_active:
+            return
         import numpy as np
         n = self.waveform_bars
         # 均匀抽样，取绝对值作为柱高
@@ -671,6 +742,45 @@ class Bili2TextGUI:
         self._waveform_active = False
         self.waveform_data = [0.0] * self.waveform_bars
 
+    def _toggle_audio_test(self):
+        """切换音频测试：开始/停止麦克风音量检测"""
+        if self._test_monitor is not None:
+            # 停止测试
+            self._test_monitor.stop()
+            self._test_monitor = None
+            self._stop_waveform()
+            self.test_audio_btn.config(text="测试音频")
+            self._update_record_btn_state()
+            self.device_combo.config(state='readonly')
+        else:
+            # 开始测试
+            device = self.record_device_var.get()
+            try:
+                from silence_monitor import SilenceMonitor
+                self._test_monitor = SilenceMonitor(
+                    device_name=device,
+                    level_callback=self._on_audio_level
+                )
+                self._test_monitor.start()
+                self._start_waveform()
+                self.test_audio_btn.config(text="停止测试")
+                self.start_record_btn.config(state='disabled')
+                self.device_combo.config(state='disabled')
+            except Exception as e:
+                self._test_monitor = None
+                messagebox.showerror("错误", f"音频测试启动失败: {str(e)}")
+
+    # ---- 录制状态辅助 ----
+
+    def _can_record(self):
+        """判断当前是否可以开始录制（硬件未被占用）"""
+        return self.audio_recorder is None and self._test_monitor is None
+
+    def _update_record_btn_state(self):
+        """根据当前状态刷新 '开始录制' 按钮"""
+        state = 'normal' if self._can_record() else 'disabled'
+        self.start_record_btn.config(state=state)
+
     # ---- 辅助方法 ----
 
     def _update_file_status(self, message):
@@ -704,7 +814,17 @@ class Bili2TextGUI:
 
         if messagebox.askyesno("确认清理", f"将删除以下文件:\n{names}\n\n确定要清理吗？"):
             self._do_clean_files()
+            self._pending_session = None  # 避免已删文件还排着队
             self.file_clean_btn.config(state='disabled')
+
+            # 如果在录音模式下，重置录音会话状态
+            if self.input_mode_var.get() == "record":
+                self.chunk_files = None
+                self.record_status_label.config(text="录音状态: 未开始",
+                                                foreground='black')
+                self.file_start_btn.config(state='disabled')
+                self.file_result_text.delete(1.0, tk.END)
+
             messagebox.showinfo("清理完成", "中间文件已清理")
 
     def _do_clean_files(self):
@@ -745,7 +865,7 @@ class Bili2TextGUI:
 
     def _transcribe_with_progress(self, transcribe_fn):
         """包装识别调用，捕获 whisper 内部 tqdm 进度到 GUI 进度条"""
-        import whisper.transcribe as _wt
+        import tqdm as _tqdm_mod
         from tqdm import tqdm as _orig_tqdm
         progress_bar = self.file_progress
 
@@ -755,12 +875,12 @@ class Bili2TextGUI:
                 if self.total and self.total > 0:
                     progress_bar.config(value=int(self.n / self.total * 1000))
 
-        _saved = _wt.tqdm
-        _wt.tqdm = _ProgressTqdm
+        _saved_cls = _tqdm_mod.tqdm
+        _tqdm_mod.tqdm = _ProgressTqdm
         try:
             return transcribe_fn()
         finally:
-            _wt.tqdm = _saved
+            _tqdm_mod.tqdm = _saved_cls
 
     def _is_repetitive(self, text):
         """检测文本是否存在大量重复（Whisper 幻觉特征）"""
@@ -785,24 +905,25 @@ class Bili2TextGUI:
 
         return False
 
-    def save_file_result(self):
-        """保存识别结果"""
-        if not self.local_result:
-            messagebox.showerror("错误", "没有识别结果")
-            return
-
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
-        )
-
-        if file_path:
-            try:
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(self.local_result)
-                messagebox.showinfo("成功", f"结果已保存到:\n{file_path}")
-            except Exception as e:
-                messagebox.showerror("错误", f"保存失败: {str(e)}")
+    def _open_result_file(self):
+        """查看结果：用系统默认应用打开已保存的结果文件，若无则 fallback 到另存为"""
+        if self._last_output_path and os.path.exists(self._last_output_path):
+            subprocess.Popen(['open', self._last_output_path])
+        elif self.local_result:
+            # fallback：另存为
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
+            )
+            if file_path:
+                try:
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(self.local_result)
+                    messagebox.showinfo("成功", f"结果已保存到:\n{file_path}")
+                except Exception as e:
+                    messagebox.showerror("错误", f"保存失败: {str(e)}")
+        else:
+            messagebox.showinfo("提示", "没有可查看的结果文件")
 
     # ---- Tab 2: 实时音频识别（不动） ----
 
@@ -1006,7 +1127,6 @@ GitHub: https://github.com/lanbinleo/bili2text
     def _send_notification(self, title, message):
         """发送 macOS 系统通知"""
         try:
-            import subprocess
             subprocess.Popen([
                 'osascript', '-e',
                 f'display notification "{message}" with title "{title}"'
@@ -1036,34 +1156,49 @@ GitHub: https://github.com/lanbinleo/bili2text
         chunk_files = self.audio_recorder.stop_recording(merge=False)
         self.audio_recorder = None
 
+        new_chunks = None
         if chunk_files:
             new_chunks = chunk_files if isinstance(chunk_files, list) else [chunk_files]
-            if self.chunk_files is None:
-                self.chunk_files = []
-            self.chunk_files.extend(new_chunks)
 
-        total = len(self.chunk_files) if self.chunk_files else 0
-
-        if self.managed_mode_var.get() and total > 0:
-            # 托管模式：直接进入识别流程
-            self.record_status_label.config(
-                text="托管模式：静音自动停止，开始识别...",
-                foreground='black')
-            self.start_record_btn.config(text="开始录制", state='disabled')
-            self.stop_record_btn.config(state='disabled')
-            self.file_start_btn.config(state='normal')
-            self._start_file_action()
+        if self.managed_mode_var.get() and new_chunks:
+            if self._recognition_running:
+                # 上一轮还在跑 → 排队
+                self._pending_session = new_chunks
+                self.chunk_files = None
+                self.record_status_label.config(
+                    text="托管模式：静音停止，新录音已排队等待识别",
+                    foreground='black')
+            else:
+                # 直接进入识别流程
+                self.chunk_files = new_chunks
+                self._cleanable_paths = list(new_chunks)
+                self.record_status_label.config(
+                    text="托管模式：静音自动停止，开始识别...",
+                    foreground='black')
+                self.stop_record_btn.config(state='disabled')
+                self.file_start_btn.config(state='normal')
+                self._start_file_action()
         else:
-            # 非托管：通知 + 界面提供继续/识别选项
+            # 非托管（或无有效录音）
+            if new_chunks:
+                if self.chunk_files is None:
+                    self.chunk_files = []
+                self.chunk_files.extend(new_chunks)
+
+            total = len(self.chunk_files) if self.chunk_files else 0
             self.record_status_label.config(
                 text=f"录音状态: 静音暂停（已录{total}段）— 可继续录制或开始识别",
                 foreground='red')
-            self.start_record_btn.config(text="继续录制", state='normal')
             self.stop_record_btn.config(state='disabled')
             if total > 0:
                 self.file_start_btn.config(state='normal')
+                self._cleanable_paths = list(self.chunk_files)
+                self.file_clean_btn.config(state='normal')
             self._send_notification("录音静音暂停",
                 f"已静音 {int(duration)} 秒，录音已暂停（已录{total}段）")
+
+        self.start_record_btn.config(text="继续录制")
+        self._update_record_btn_state()
 
     def _on_speech_resumed(self):
         """录音: 声音恢复"""
@@ -1114,6 +1249,9 @@ def main():
     app = Bili2TextGUI(root)
 
     def on_closing():
+        if app._test_monitor is not None:
+            app._test_monitor.stop()
+            app._test_monitor = None
         if app.is_realtime_recording:
             if messagebox.askokcancel("退出", "正在进行实时识别，确定要退出吗？"):
                 app.stop_realtime_recognition()
